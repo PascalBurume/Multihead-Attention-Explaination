@@ -688,34 +688,105 @@ output = mha(x)
 ### Shape Transformations (Visual Guide)
 
 ```
-Input x:           (batch=2, seq=6, d_in=768)
-                          │
-                          ▼ W_query, W_key, W_value
-Q, K, V:           (batch=2, seq=6, d_out=768)
-                          │
-                          ▼ .view(batch, seq, num_heads, head_dim)
-Split:             (batch=2, seq=6, heads=12, head_dim=64)
-                          │
-                          ▼ .transpose(1, 2)
-Transposed:        (batch=2, heads=12, seq=6, head_dim=64)
-                          │
-                          ▼ Q @ K.T
-Attention Scores:  (batch=2, heads=12, seq=6, seq=6)
-                          │
-                          ▼ mask, softmax, dropout
-Attention Weights: (batch=2, heads=12, seq=6, seq=6)
-                          │
-                          ▼ @ V
-Context:           (batch=2, heads=12, seq=6, head_dim=64)
-                          │
-                          ▼ .transpose(1, 2)
-Transposed Back:   (batch=2, seq=6, heads=12, head_dim=64)
-                          │
-                          ▼ .view(batch, seq, d_out)
-Concatenated:      (batch=2, seq=6, d_out=768)
-                          │
-                          ▼ out_proj
-Output:            (batch=2, seq=6, d_out=768)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           INPUT & LINEAR PROJECTIONS                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                Input x: (batch=2, seq=6, d_in=768)
+                                │
+                                │ Each token: 768-dim vector
+                                │
+                                ▼
+               ┌───────────────────────────────────┐
+               │    Linear Projections (W_q, W_k, W_v)    │
+               │        d_in=768 → d_out=768        │
+               └───────────────────────────────────┘
+                                │
+                    ┌───────────┼───────────┐
+                    │           │           │
+                    ▼           ▼           ▼
+               Queries      Keys        Values
+              (2, 6, 768) (2, 6, 768) (2, 6, 768)
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          SPLIT INTO MULTIPLE HEADS                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                    │           │           │
+                    ▼           ▼           ▼
+              .view(2, 6, 12, 64)  ← Split into 12 heads, each 64-dim
+                    │           │           │
+         ┌──────────┴───┬───────┴───┬───────┴────────┐
+         │              │           │                │
+         Q_heads        K_heads     V_heads          │
+   (2, 6, 12, 64) (2, 6, 12, 64) (2, 6, 12, 64)     │
+         │              │           │                │
+         └──────────────┼───────────┼────────────────┘
+                        │           │
+                        ▼           ▼
+               .transpose(1, 2)  ← Move head dimension before seq
+                        │           │           │
+                        ▼           ▼           ▼
+               (2, 12, 6, 64) (2, 12, 6, 64) (2, 12, 6, 64)
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           ATTENTION COMPUTATION                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+               ┌───────────────────────────────────┐
+               │    Q @ K.transpose(-2, -1)        │
+               │   (2,12,6,64) @ (2,12,64,6)       │
+               └───────────────────────────────────┘
+                                │
+                                ▼
+                  Attention Scores: (2, 12, 6, 6)
+                          Score Matrix per head:
+                         ┌─────────────┐
+                         │ s11 s12 ... │
+                         │ s21 s22 ... │
+                         │ ...  ... ...│
+                         └─────────────┘
+                                │
+                                ▼ Scale by √head_dim
+                         scores / √64 = scores / 8
+                                │
+                                ▼
+                           Softmax + Mask
+                         (across last dim)
+                                │
+                                ▼
+                  Attention Weights: (2, 12, 6, 6)
+                                │
+                                ▼ @ V
+               attn_weights @ V → (2, 12, 6, 64)
+                         ┌─────────────┐  ┌─────────┐
+                         │ w11 w12 ... │  │ v1 v2 ..│
+                         │ w21 w22 ... │@ │ v1 v2 ..│
+                         │ ...  ... ...│  │ .. .. ..│
+                         └─────────────┘  └─────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       COMBINE HEADS & OUTPUT PROJECTION                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                        │
+                        ▼ .transpose(1, 2)
+               (2, 6, 12, 64) ← Move seq back before heads
+                        │
+                        ▼ .view(2, 6, 768)
+            Concatenate heads: (2, 6, 12*64=768)
+                        │
+                        ▼
+               ┌─────────────────────────┐
+               │    Output Projection    │
+               │    Linear(768, 768)     │
+               └─────────────────────────┘
+                        │
+                        ▼
+               Output: (2, 6, 768)
 ```
 
 ---
