@@ -865,7 +865,7 @@ class MultiHeadAttention(nn.Module):
         ### 4. RECOMBINING HEADS (VIDEO REF 07:31)
         ### After calculating attention for each head, we 'glue' them back together.
         ### .contiguous() is used because .transpose() changes how memory is stored.
-        ### Sebastian explains this as 're-organizing' memory for efficiency
+        ### this as 're-organizing' memory for efficiency
 
         # Compute output
         out = weights @ v
