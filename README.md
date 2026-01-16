@@ -1,713 +1,468 @@
-# 🧠 MULTI-HEAD ATTENTION: COMPLETE IMPLEMENTATION GUIDE
-## For Pascal - Use this for homework!
+# 🧠 Attention Mechanisms: Complete Implementation Guide
+
+> **Author:** Pascal Burume  
+> **Purpose:** Research Reference for LLM Implementation  
+> **Based On:** "Build a Large Language Model From Scratch" by Sebastian Raschka (Chapter 3)  
+> **Last Updated:** January 2025
 
 ---
 
-# PART 1: THE CONCEPT (30 seconds review)
+## 📑 Table of Contents
+
+1. [Overview](#overview)
+2. [Key Concepts](#key-concepts)
+3. [The Attention Formula](#the-attention-formula)
+4. [Implementation Roadmap](#implementation-roadmap)
+5. [Variant 1: Simplified Self-Attention](#variant-1-simplified-self-attention)
+6. [Variant 2: Self-Attention with Trainable Weights](#variant-2-self-attention-with-trainable-weights)
+7. [Variant 3: Causal Attention](#variant-3-causal-attention)
+8. [Variant 4: Multi-Head Attention](#variant-4-multi-head-attention) ⭐
+9. [Complete Production Code](#complete-production-code)
+10. [GPT-2 Specifications](#gpt-2-specifications)
+11. [Common Errors & Solutions](#common-errors--solutions)
+12. [Quick Reference Cheat Sheet](#quick-reference-cheat-sheet)
+
+---
+
+## Overview
+
+### What is Attention?
+
+Attention is a mechanism that allows a model to **focus on relevant parts** of the input when producing an output. Instead of treating all input tokens equally, attention learns which tokens are most important for each position.
+
+### Why Attention Matters
+
+| Problem with RNNs | Solution with Attention |
+|-------------------|------------------------|
+| Sequential processing (slow) | Parallel processing (fast) |
+| Forgets long-range dependencies | Direct access to all positions |
+| Fixed context representation | Dynamic, query-specific context |
+
+### The Four Variants (Progressive Complexity)
 
 ```
-MULTI-HEAD ATTENTION = Split → Attend → Concat → Project
-
-d_model = num_heads × head_dim
-  768   =    12     ×    64
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   Simplified    │ ──▶ │  Self-Attention │ ──▶ │     Causal      │ ──▶ │   Multi-Head    │
+│ Self-Attention  │     │   (Trainable)   │     │    Attention    │     │    Attention    │
+├─────────────────┤     ├─────────────────┤     ├─────────────────┤     ├─────────────────┤
+│ No learnable    │     │ Adds W_q, W_k,  │     │ Masks future    │     │ Multiple        │
+│ weights         │     │ W_v matrices    │     │ tokens          │     │ parallel heads  │
+└─────────────────┘     └─────────────────┘     └─────────────────┘     └─────────────────┘
 ```
 
 ---
 
-# PART 2: THE COMPLETE CODE TEMPLATE
+## Key Concepts
 
-## 📝 Copy This for Homework:
+### Query, Key, Value (Q, K, V)
+
+| Component | Symbol | Description | Analogy |
+|-----------|--------|-------------|---------|
+| **Query** | Q | "What am I looking for?" | Search query in Google |
+| **Key** | K | "What do I contain?" | Page titles/metadata |
+| **Value** | V | "What information do I provide?" | Actual page content |
+
+### How Attention Works (Intuition)
+
+```
+Input: "Your journey starts with one step"
+
+For the word "journey" (query):
+1. Compare "journey" with ALL words (using Q·K)
+2. Get similarity scores: [0.14, 0.24, 0.23, 0.13, 0.11, 0.16]
+3. These scores = attention weights (sum to 1.0)
+4. Weighted sum of all values = context vector for "journey"
+
+Result: "journey" now contains information from ALL words,
+        weighted by relevance!
+```
+
+### Dimensions Explained
+
+```python
+# Input dimensions
+batch_size = 2          # Number of sequences in a batch
+seq_length = 6          # Number of tokens per sequence (context length)
+d_in = 768              # Input embedding dimension
+d_out = 768             # Output embedding dimension (often d_in == d_out)
+
+# Multi-head dimensions
+num_heads = 12          # Number of attention heads
+head_dim = d_out // num_heads  # Dimension per head (768/12 = 64)
+
+# Tensor shapes through the pipeline:
+# Input:        (batch_size, seq_length, d_in)      = (2, 6, 768)
+# After Q/K/V:  (batch_size, seq_length, d_out)     = (2, 6, 768)
+# Split heads:  (batch_size, num_heads, seq_length, head_dim) = (2, 12, 6, 64)
+# Output:       (batch_size, seq_length, d_out)     = (2, 6, 768)
+```
+
+---
+
+## The Attention Formula
+
+### Scaled Dot-Product Attention
+
+$$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right) V$$
+
+### Breaking Down the Formula
+
+```
+Step 1: QK^T
+        ─────
+        Compute similarity between all query-key pairs
+        Shape: (seq_len, d_k) @ (d_k, seq_len) = (seq_len, seq_len)
+
+Step 2: ÷ √d_k
+        ──────
+        Scale down to prevent extreme softmax values
+        Keeps gradients stable during training
+
+Step 3: softmax(...)
+        ────────────
+        Convert scores to probabilities (sum to 1 per row)
+        
+Step 4: × V
+        ───
+        Weighted sum of values using attention weights
+        Shape: (seq_len, seq_len) @ (seq_len, d_v) = (seq_len, d_v)
+```
+
+### Why Scale by √d_k?
+
+```python
+# Without scaling:
+d_k = 64
+# Dot products grow with dimension: mean ≈ 0, variance ≈ d_k
+# Large values → softmax becomes nearly one-hot → tiny gradients
+
+# With scaling:
+# Divide by √64 = 8 → variance ≈ 1 → stable softmax → healthy gradients
+```
+
+---
+
+## Implementation Roadmap
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                    IMPLEMENTATION CHECKLIST                        │
+├────────────────────────────────────────────────────────────────────┤
+│ □ Step 1: Understand simplified attention (no weights)             │
+│ □ Step 2: Add trainable W_q, W_k, W_v matrices                     │
+│ □ Step 3: Implement scaling (÷ √d_k)                               │
+│ □ Step 4: Add causal mask for autoregressive generation            │
+│ □ Step 5: Add dropout for regularization                           │
+│ □ Step 6: Extend to multi-head attention                           │
+│ □ Step 7: Add output projection layer                              │
+│ □ Step 8: Test with batch inputs                                   │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Variant 1: Simplified Self-Attention
+
+> **Purpose:** Understand the core concept without trainable weights
+
+### Code
+
+```python
+import torch
+
+# Sample input: "Your journey starts with one step"
+# Each word is a 3D embedding vector
+inputs = torch.tensor([
+    [0.43, 0.15, 0.89],  # Your    (x^1)
+    [0.55, 0.87, 0.66],  # journey (x^2)
+    [0.57, 0.85, 0.64],  # starts  (x^3)
+    [0.22, 0.58, 0.33],  # with    (x^4)
+    [0.77, 0.25, 0.10],  # one     (x^5)
+    [0.05, 0.80, 0.55]   # step    (x^6)
+])
+
+# Step 1: Compute attention scores (dot products)
+# Query = inputs[1] ("journey")
+query = inputs[1]
+attn_scores = torch.empty(inputs.shape[0])
+for i, x_i in enumerate(inputs):
+    attn_scores[i] = torch.dot(x_i, query)
+# Result: tensor([0.9544, 1.4950, 1.4754, 0.8434, 0.7070, 1.0865])
+
+# Step 2: Normalize with softmax
+attn_weights = torch.softmax(attn_scores, dim=0)
+# Result: tensor([0.1385, 0.2379, 0.2333, 0.1240, 0.1082, 0.1581])
+# Sum = 1.0
+
+# Step 3: Compute context vector (weighted sum)
+context_vec = torch.zeros(query.shape)
+for i, x_i in enumerate(inputs):
+    context_vec += attn_weights[i] * x_i
+# Result: tensor([0.4419, 0.6515, 0.5683])
+
+# ═══════════════════════════════════════════════════════════════
+# EFFICIENT VERSION: Compute ALL context vectors at once
+# ═══════════════════════════════════════════════════════════════
+attn_scores = inputs @ inputs.T          # (6, 6) attention matrix
+attn_weights = torch.softmax(attn_scores, dim=-1)  # Normalize rows
+all_context_vecs = attn_weights @ inputs  # (6, 3) all context vectors
+```
+
+### Key Takeaways
+
+- ✅ Simple dot product measures similarity
+- ✅ Softmax converts scores to probabilities
+- ✅ Context vector = weighted sum of all inputs
+- ❌ No learnable parameters (can't train!)
+
+---
+
+## Variant 2: Self-Attention with Trainable Weights
+
+> **Purpose:** Add learnable parameters that improve during training
+
+### Code
 
 ```python
 import torch
 import torch.nn as nn
 
-class MultiHeadAttention(nn.Module):
+class SelfAttention(nn.Module):
     """
-    Multi-Head Attention with Causal Mask
-    Use this for homework!
-    """
+    Self-attention with trainable weight matrices.
     
-    def __init__(self, d_in, d_out, context_length, dropout, num_heads, qkv_bias=False):
-        super().__init__()
+    Args:
+        d_in: Input embedding dimension
+        d_out: Output embedding dimension
+        qkv_bias: Whether to include bias in Q, K, V projections
+    """
+    def __init__(self, d_in, d_out, qkv_bias=False):
+        super().__init__()  # Initialize parent class (nn.Module)
         
-        # ===== STEP 0: Save configuration =====
-        assert d_out % num_heads == 0, "d_out must be divisible by num_heads"
-        
-        self.d_out = d_out
-        self.num_heads = num_heads
-        self.head_dim = d_out // num_heads  # 768 // 12 = 64
-        
-        # ===== STEP 1: Create weight matrices =====
+        # Trainable weight matrices
+        # nn.Linear performs: output = input @ weight.T + bias
         self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
         self.W_key   = nn.Linear(d_in, d_out, bias=qkv_bias)
         self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
-        self.out_proj = nn.Linear(d_out, d_out)
+    
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape (batch_size, seq_length, d_in)
+        Returns:
+            Context vectors of shape (batch_size, seq_length, d_out)
+        """
+        # Project inputs to Q, K, V spaces
+        queries = self.W_query(x)  # (batch, seq_len, d_out)
+        keys    = self.W_key(x)    # (batch, seq_len, d_out)
+        values  = self.W_value(x)  # (batch, seq_len, d_out)
         
-        # ===== STEP 2: Create dropout and causal mask =====
+        # Compute attention scores
+        attn_scores = queries @ keys.transpose(-2, -1)  # (batch, seq_len, seq_len)
+        
+        # Scale by √d_k for numerical stability
+        d_k = keys.shape[-1]
+        attn_scores = attn_scores / (d_k ** 0.5)
+        
+        # Convert to probabilities
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+        
+        # Compute context vectors
+        context_vec = attn_weights @ values  # (batch, seq_len, d_out)
+        
+        return context_vec
+
+
+# Usage example
+d_in, d_out = 3, 2
+model = SelfAttention(d_in, d_out)
+
+# Input: (batch_size=1, seq_length=6, d_in=3)
+x = inputs.unsqueeze(0)  # Add batch dimension
+output = model(x)
+print(output.shape)  # torch.Size([1, 6, 2])
+```
+
+### Key Takeaways
+
+- ✅ W_query, W_key, W_value are learned during training
+- ✅ Scaling by √d_k prevents gradient issues
+- ✅ Input/output dimensions can differ (d_in ≠ d_out)
+- ❌ Can still "see" future tokens (problematic for generation)
+
+---
+
+## Variant 3: Causal Attention
+
+> **Purpose:** Mask future tokens for autoregressive (left-to-right) generation
+
+### The Masking Problem
+
+```
+Standard Attention:              Causal Attention:
+(Can see everything)             (Can only see past + current)
+
+     Your journey starts         Your journey starts
+Your  [✓]   [✓]    [✓]          [✓]   [✗]    [✗]    
+journey[✓]   [✓]    [✓]          [✓]   [✓]    [✗]    
+starts [✓]   [✓]    [✓]          [✓]   [✓]    [✓]    
+
+Problem: When predicting         Solution: Mask out future
+"starts", model can cheat        positions with -∞ before
+by looking at future words!      applying softmax
+```
+
+### Code
+
+```python
+import torch
+import torch.nn as nn
+
+class CausalAttention(nn.Module):
+    """
+    Causal (masked) self-attention for autoregressive models.
+    
+    Args:
+        d_in: Input embedding dimension
+        d_out: Output embedding dimension  
+        context_length: Maximum sequence length
+        dropout: Dropout probability
+        qkv_bias: Whether to include bias in Q, K, V projections
+    """
+    def __init__(self, d_in, d_out, context_length, dropout, qkv_bias=False):
+        super().__init__()
+        self.d_out = d_out
+        
+        # Projection layers
+        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_key   = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
+        
+        # Dropout for regularization
         self.dropout = nn.Dropout(dropout)
+        
+        # Causal mask: upper triangular matrix of 1s
+        # register_buffer: saves with model but not trained
         self.register_buffer(
-            "mask", 
+            'mask',
             torch.triu(torch.ones(context_length, context_length), diagonal=1)
         )
     
     def forward(self, x):
-        # ===== Get input dimensions =====
-        b, num_tokens, d_in = x.shape
+        """
+        Args:
+            x: Input tensor (batch_size, seq_length, d_in)
+        Returns:
+            Context vectors (batch_size, seq_length, d_out)
+        """
+        batch_size, num_tokens, d_in = x.shape
         
-        # ===== STEP 3: Project to Q, K, V =====
-        # Shape: (b, num_tokens, d_out)
-        Q = self.W_query(x)
-        K = self.W_key(x)
-        V = self.W_value(x)
+        # Project to Q, K, V
+        queries = self.W_query(x)
+        keys    = self.W_key(x)
+        values  = self.W_value(x)
         
-        # ===== STEP 4: Split into heads =====
-        # (b, num_tokens, d_out) → (b, num_tokens, num_heads, head_dim)
-        Q = Q.view(b, num_tokens, self.num_heads, self.head_dim)
-        K = K.view(b, num_tokens, self.num_heads, self.head_dim)
-        V = V.view(b, num_tokens, self.num_heads, self.head_dim)
+        # Compute attention scores
+        attn_scores = queries @ keys.transpose(1, 2)  # (batch, seq, seq)
         
-        # (b, num_tokens, num_heads, head_dim) → (b, num_heads, num_tokens, head_dim)
-        Q = Q.transpose(1, 2)
-        K = K.transpose(1, 2)
-        V = V.transpose(1, 2)
+        # Apply causal mask BEFORE softmax
+        # masked_fill_ replaces positions where mask==True with -inf
+        # e^(-inf) = 0, so these positions get zero attention
+        attn_scores.masked_fill_(
+            self.mask.bool()[:num_tokens, :num_tokens],
+            -torch.inf
+        )
         
-        # ===== STEP 5: Compute attention scores =====
-        # (b, num_heads, num_tokens, head_dim) @ (b, num_heads, head_dim, num_tokens)
-        # → (b, num_heads, num_tokens, num_tokens)
-        attn_scores = Q @ K.transpose(2, 3)
+        # Scale and normalize
+        attn_weights = torch.softmax(
+            attn_scores / keys.shape[-1] ** 0.5,
+            dim=-1
+        )
         
-        # ===== STEP 6: Apply causal mask =====
-        mask_bool = self.mask.bool()[:num_tokens, :num_tokens]
-        attn_scores.masked_fill_(mask_bool, -torch.inf)
-        
-        # ===== STEP 7: Scale and softmax =====
-        attn_scores = attn_scores / (self.head_dim ** 0.5)
-        attn_weights = torch.softmax(attn_scores, dim=-1)
+        # Apply dropout (only during training)
         attn_weights = self.dropout(attn_weights)
         
-        # ===== STEP 8: Apply attention to values =====
-        # (b, num_heads, num_tokens, num_tokens) @ (b, num_heads, num_tokens, head_dim)
-        # → (b, num_heads, num_tokens, head_dim)
-        context = attn_weights @ V
+        # Compute context vectors
+        context_vec = attn_weights @ values
         
-        # ===== STEP 9: Concat heads =====
-        # (b, num_heads, num_tokens, head_dim) → (b, num_tokens, num_heads, head_dim)
-        context = context.transpose(1, 2)
-        
-        # (b, num_tokens, num_heads, head_dim) → (b, num_tokens, d_out)
-        context = context.contiguous().view(b, num_tokens, self.d_out)
-        
-        # ===== STEP 10: Output projection =====
-        output = self.out_proj(context)
-        
-        return output
-```
+        return context_vec
 
----
 
-# PART 3: HOW TO USE IT
+# Usage example
+context_length = 1024  # Max sequence length
+dropout = 0.1          # 10% dropout during training
 
-```python
-# Configuration (GPT-2 small style)
-d_model = 768        # Embedding dimension
-num_heads = 12       # Number of attention heads
-context_length = 1024  # Maximum sequence length
-dropout = 0.1        # Dropout rate
-batch_size = 4       # Batch size
-seq_len = 100        # Actual sequence length
-
-# Create the model
-mha = MultiHeadAttention(
-    d_in=d_model,
-    d_out=d_model,
+model = CausalAttention(
+    d_in=768,
+    d_out=768,
     context_length=context_length,
-    dropout=dropout,
-    num_heads=num_heads,
-    qkv_bias=False
+    dropout=dropout
 )
-
-# Create dummy input
-x = torch.randn(batch_size, seq_len, d_model)
-
-# Forward pass
-output = mha(x)
-
-print(f"Input shape:  {x.shape}")      # (4, 100, 768)
-print(f"Output shape: {output.shape}") # (4, 100, 768)
 ```
+
+### Key Takeaways
+
+- ✅ Causal mask prevents "cheating" during generation
+- ✅ `register_buffer` saves mask with model (not trained)
+- ✅ Dropout helps prevent overfitting
+- ✅ `.masked_fill_()` is efficient (in-place operation)
 
 ---
 
-# PART 4: STEP-BY-STEP DIMENSION TRACKING
+## Variant 4: Multi-Head Attention
 
-## 🔑 This is the KEY to understanding!
+> ⭐ **This is the complete implementation used in GPT models!**
 
-```
-INPUT: x
-Shape: (batch, seq, d_model) = (4, 100, 768)
-
-STEP 3: Project to Q, K, V
-├── Q = W_query(x)
-├── K = W_key(x)  
-├── V = W_value(x)
-└── Shape: (4, 100, 768)
-
-STEP 4: Split into heads
-├── .view(b, seq, num_heads, head_dim)
-│   Shape: (4, 100, 12, 64)
-├── .transpose(1, 2)
-│   Shape: (4, 12, 100, 64)
-└── Now: (batch, HEADS, seq, head_dim)
-
-STEP 5: Attention scores
-├── Q @ K.transpose(2, 3)
-├── (4, 12, 100, 64) @ (4, 12, 64, 100)
-└── Shape: (4, 12, 100, 100)  ← Each head has 100×100 attention matrix!
-
-STEP 6-7: Mask, Scale, Softmax
-└── Shape: (4, 12, 100, 100)  ← Same, just normalized
-
-STEP 8: Apply to Values
-├── attn_weights @ V
-├── (4, 12, 100, 100) @ (4, 12, 100, 64)
-└── Shape: (4, 12, 100, 64)
-
-STEP 9: Concat heads
-├── .transpose(1, 2)
-│   Shape: (4, 100, 12, 64)
-├── .view(b, seq, d_out)
-│   Shape: (4, 100, 768)
-└── Back to original shape!
-
-STEP 10: Output projection
-└── Shape: (4, 100, 768)  ← Same as input!
-```
-
----
-
-# PART 5: THE 4 KEY OPERATIONS EXPLAINED
-
-## 1️⃣ `.view()` - Reshape without copying
-
-```python
-# Example: Split 768 into 12 heads of 64
-x = torch.randn(4, 100, 768)
-
-# 768 → 12 × 64
-x = x.view(4, 100, 12, 64)
-
-# Think of it as: [||||||||] → [|  |  |  |  |  |  |  |  |  |  |  |  |]
-#                   768          64 64 64 64 64 64 64 64 64 64 64 64
-```
-
-## 2️⃣ `.transpose(dim1, dim2)` - Swap dimensions
-
-```python
-x = torch.randn(4, 100, 12, 64)
-#                b  seq heads dim
-
-x = x.transpose(1, 2)  # Swap position 1 and 2
-#                b  heads seq  dim
-# Shape: (4, 12, 100, 64)
-```
-
-## 3️⃣ `@` (Matrix Multiply) - The attention computation
-
-```python
-Q = torch.randn(4, 12, 100, 64)  # (batch, heads, seq, head_dim)
-K = torch.randn(4, 12, 100, 64)
-
-# Q @ K.transpose(2, 3) means:
-# (4, 12, 100, 64) @ (4, 12, 64, 100) → (4, 12, 100, 100)
-#                           ↑ transposed last 2 dims
-
-attn_scores = Q @ K.transpose(2, 3)
-```
-
-## 4️⃣ `.contiguous().view()` - Safe reshape after transpose
-
-```python
-# After transpose, memory might not be contiguous
-# .contiguous() makes it contiguous before .view()
-
-x = x.transpose(1, 2)          # Memory not contiguous
-x = x.contiguous()             # Make contiguous
-x = x.view(b, seq, d_out)      # Now safe to reshape
-
-# Often written as one line:
-x = x.transpose(1, 2).contiguous().view(b, seq, d_out)
-```
-
----
-
-# PART 6: COMMON HOMEWORK QUESTIONS
-
-## Q1: "What is the purpose of each weight matrix?"
-
-| Matrix | Purpose | Analogy |
-|--------|---------|---------|
-| `W_query` | Create search queries | "What am I looking for?" |
-| `W_key` | Create keys for matching | "What do I contain?" |
-| `W_value` | Create values to retrieve | "What info do I provide?" |
-| `out_proj` | Combine all head outputs | "Mix everything together" |
-
-## Q2: "Why do we scale by sqrt(head_dim)?"
-
-```python
-attn_scores = attn_scores / (self.head_dim ** 0.5)
-```
-
-**Answer:** 
-- Large dot products → extreme softmax values → tiny gradients
-- Scaling keeps values in reasonable range
-- head_dim=64 → scale by √64 = 8
-
-## Q3: "What does the causal mask do?"
-
-```python
-# Creates upper triangular matrix of 1s
-mask = torch.triu(torch.ones(seq, seq), diagonal=1)
-
-# Fills masked positions with -infinity
-attn_scores.masked_fill_(mask.bool(), -torch.inf)
-
-# After softmax: -inf → 0 (can't attend to future!)
-```
-
-## Q4: "Why multiple heads?"
-
-**Answer:** Different heads learn different patterns:
-- Head 1: Subject-verb relationships
-- Head 2: Pronoun references  
-- Head 3: Adjacent word context
-- etc.
-
----
-
-# PART 7: QUICK REFERENCE CARD
-
-## Dimensions at Each Step:
-
-| Step | Operation | Shape |
-|------|-----------|-------|
-| Input | x | (b, seq, d_model) |
-| Project | Q, K, V = W(x) | (b, seq, d_model) |
-| Split | .view() | (b, seq, heads, head_dim) |
-| Reorder | .transpose(1,2) | (b, **heads**, seq, head_dim) |
-| Scores | Q @ K.T | (b, heads, seq, **seq**) |
-| Attend | weights @ V | (b, heads, seq, head_dim) |
-| Reorder | .transpose(1,2) | (b, seq, heads, head_dim) |
-| Concat | .view() | (b, seq, d_model) |
-| Output | out_proj() | (b, seq, d_model) |
-
-## Key Formulas:
+### Why Multiple Heads?
 
 ```
-head_dim = d_model / num_heads
-
-Attention = softmax(QK^T / √head_dim) × V
-
-MultiHead = Concat(head_1, ..., head_h) × W_out
+Single Head:                     Multi-Head:
+├── Can only learn ONE           ├── Head 1: Syntactic patterns
+│   type of relationship         ├── Head 2: Semantic similarity
+│   at a time                    ├── Head 3: Positional relationships
+│                                ├── Head 4: Coreference resolution
+│                                └── ... (learns diverse patterns)
 ```
 
----
-
-# PART 8: MINIMAL VERSION (For Quick Reference)
-
-```python
-def forward(self, x):
-    b, n, _ = x.shape
-    
-    # Project
-    Q = self.W_q(x)
-    K = self.W_k(x)
-    V = self.W_v(x)
-    
-    # Split heads
-    Q = Q.view(b, n, self.h, self.d).transpose(1, 2)
-    K = K.view(b, n, self.h, self.d).transpose(1, 2)
-    V = V.view(b, n, self.h, self.d).transpose(1, 2)
-    
-    # Attention
-    scores = Q @ K.transpose(-2, -1) / (self.d ** 0.5)
-    scores = scores.masked_fill(self.mask[:n, :n].bool(), -torch.inf)
-    weights = torch.softmax(scores, dim=-1)
-    
-    # Combine
-    out = (weights @ V).transpose(1, 2).contiguous().view(b, n, self.d_out)
-    return self.proj(out)
-```
-
----
-
-# PART 9: TESTING YOUR IMPLEMENTATION
-
-```python
-# Test code - add this to verify your implementation works
-def test_mha():
-    # Setup
-    d_model, num_heads = 768, 12
-    mha = MultiHeadAttention(d_model, d_model, 1024, 0.0, num_heads)
-    x = torch.randn(2, 50, d_model)
-    
-    # Forward
-    out = mha(x)
-    
-    # Checks
-    assert out.shape == x.shape, f"Shape mismatch: {out.shape} vs {x.shape}"
-    assert not torch.isnan(out).any(), "Output contains NaN!"
-    print("✅ All tests passed!")
-
-test_mha()
-```
-
----
-
-# SUMMARY: What to Remember for Homework
-
-1. **The 10 steps:** Project → Split → Transpose → Attention → Concat → Project
-2. **The key equation:** `d_model = num_heads × head_dim`
-3. **The 4 operations:** `.view()`, `.transpose()`, `@`, `.contiguous()`
-4. **Input/Output:** Same shape! (batch, seq, d_model)
-
-Good luck with your homework, Pascal! 🚀
-
-
-# 🧠 MULTI-HEAD ATTENTION: COMPLETE IMPLEMENTATION GUIDE
-## For Pascal - Use this for homework!
-
----
-
-# 📌 QUICK SUMMARY (30 seconds)
-
-## The ONE Sentence:
-> **Multi-Head Attention = Split → Attend → Concat**
-> (Multiple detectives looking at the same sentence, each finding different clues)
-
-## The ONE Formula:
-```
-d_model = num_heads × head_dim
-  768   =    12     ×    64
-```
-
-## The 6 Steps:
-```
-PROJECT → SPLIT → TRANSPOSE → ATTENTION → CONCAT → PROJECT
-   1        2         3           4          5         6
-```
-
----
-
-# 📊 THE 6 STEPS EXPLAINED
-
-## Visual Overview:
+### Architecture Diagram
 
 ```
-┌─────────┐   ┌─────────┐   ┌───────────┐   ┌───────────┐   ┌─────────┐   ┌─────────┐
-│ PROJECT │ → │  SPLIT  │ → │ TRANSPOSE │ → │ ATTENTION │ → │ CONCAT  │ → │ PROJECT │
-└─────────┘   └─────────┘   └───────────┘   └───────────┘   └─────────┘   └─────────┘
-     1             2              3               4              5             6
+                    Input (batch, seq_len, d_model)
+                              │
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+           W_query         W_key          W_value
+              │               │               │
+              ▼               ▼               ▼
+         Q (b,s,d)       K (b,s,d)       V (b,s,d)
+              │               │               │
+              └───────┬───────┴───────┬───────┘
+                      │               │
+              ┌───────▼───────┐       │
+              │  Split into   │       │
+              │   num_heads   │       │
+              └───────┬───────┘       │
+                      │               │
+         ┌────────────┼────────────┐  │
+         ▼            ▼            ▼  │
+      Head 1       Head 2   ...  Head h
+    (b,s,head_dim) (b,s,hd)     (b,s,hd)
+         │            │            │
+         └────────────┼────────────┘
+                      │
+              ┌───────▼───────┐
+              │  Concatenate  │
+              └───────┬───────┘
+                      │
+              ┌───────▼───────┐
+              │ Output Proj.  │
+              └───────┬───────┘
+                      │
+                      ▼
+              Output (batch, seq_len, d_model)
 ```
 
----
-
-## STEP 1: PROJECT (Create Q, K, V)
-
-### What happens:
-Multiply input by 3 weight matrices to create Query, Key, Value
-
-### Visual:
-```
-INPUT x: (batch, seq, 768)
-              │
-              ▼
-    ┌─────────────────────┐
-    │   x @ W_query → Q   │
-    │   x @ W_key   → K   │
-    │   x @ W_value → V   │
-    └─────────────────────┘
-              │
-              ▼
-Q, K, V: (batch, seq, 768)
-```
-
-### Code:
-```python
-Q = self.W_query(x)  # (batch, seq, 768)
-K = self.W_key(x)    # (batch, seq, 768)
-V = self.W_value(x)  # (batch, seq, 768)
-```
-
-### Shape Change:
-```
-(batch, seq, 768) → (batch, seq, 768)  # Same shape, different content
-```
-
----
-
-## STEP 2: SPLIT (Divide into heads)
-
-### What happens:
-Reshape 768 → 12 heads × 64 dimensions each
-
-### Visual:
-```
-BEFORE: Q is (batch, seq, 768)
-        One long vector of 768
-
-        [████████████████████████████████████████████]
-                         768
-
-AFTER:  Q is (batch, seq, 12, 64)
-        Split into 12 heads, each with 64 dimensions
-
-        [████] [████] [████] [████] [████] [████] [████] [████] [████] [████] [████] [████]
-         64     64     64     64     64     64     64     64     64     64     64     64
-        head1  head2  head3  head4  head5  head6  head7  head8  head9  head10 head11 head12
-```
-
-### Code:
-```python
-Q = Q.view(batch, seq, num_heads, head_dim)
-# (batch, seq, 768) → (batch, seq, 12, 64)
-```
-
-### Shape Change:
-```
-(batch, seq, 768) → (batch, seq, 12, 64)
-```
-
----
-
-## STEP 3: TRANSPOSE (Reorder dimensions)
-
-### What happens:
-Move "heads" dimension to position 1 (so we can do batch matrix multiply)
-
-### Why:
-PyTorch can then compute ALL 12 heads in parallel!
-
-### Visual:
-```
-BEFORE: (batch, seq, heads, head_dim)
-        (  2,  100,   12,     64   )
-               ↑      ↑
-              pos 1  pos 2
-
-AFTER:  (batch, heads, seq, head_dim)
-        (  2,    12,  100,    64   )
-                 ↑     ↑
-               pos 1  pos 2   ← SWAPPED!
-```
-
-### Code:
-```python
-Q = Q.transpose(1, 2)
-# (batch, seq, heads, head_dim) → (batch, heads, seq, head_dim)
-```
-
-### Shape Change:
-```
-(batch, seq, 12, 64) → (batch, 12, seq, 64)
-```
-
----
-
-## STEP 4: ATTENTION (The main computation)
-
-### What happens:
-This step has 4 sub-steps:
-
-### Visual:
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      STEP 4: ATTENTION                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  4a. SCORES: Q @ K^T                                           │
-│      (batch, heads, seq, 64) @ (batch, heads, 64, seq)         │
-│      → (batch, heads, seq, seq)                                │
-│                                                                 │
-│  4b. MASK: Hide future tokens                                  │
-│      scores.masked_fill_(mask, -infinity)                      │
-│                                                                 │
-│  4c. SCALE + SOFTMAX: Normalize                                │
-│      scores = scores / sqrt(64)                                │
-│      weights = softmax(scores)                                 │
-│                                                                 │
-│  4d. APPLY TO VALUES: weights @ V                              │
-│      (batch, heads, seq, seq) @ (batch, heads, seq, 64)        │
-│      → (batch, heads, seq, 64)                                 │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Code:
-```python
-# 4a. Scores
-attn_scores = Q @ K.transpose(2, 3)   # (batch, heads, seq, seq)
-
-# 4b. Mask
-attn_scores.masked_fill_(mask, -torch.inf)
-
-# 4c. Scale + Softmax  
-attn_scores = attn_scores / (head_dim ** 0.5)
-attn_weights = torch.softmax(attn_scores, dim=-1)
-
-# 4d. Apply to values
-context = attn_weights @ V            # (batch, heads, seq, head_dim)
-```
-
-### Shape Changes:
-```
-4a: (batch, 12, seq, 64) @ (batch, 12, 64, seq) → (batch, 12, seq, seq)
-4b: (batch, 12, seq, seq) → (batch, 12, seq, seq)  # Same shape, masked
-4c: (batch, 12, seq, seq) → (batch, 12, seq, seq)  # Same shape, normalized
-4d: (batch, 12, seq, seq) @ (batch, 12, seq, 64) → (batch, 12, seq, 64)
-```
-
----
-
-## STEP 5: CONCAT (Put heads back together)
-
-### What happens:
-Reverse of Split - combine all heads back into one
-
-### Visual:
-```
-BEFORE: 12 separate heads, each (batch, heads, seq, 64)
-
-        [Head1] [Head2] [Head3] ... [Head12]
-          64      64      64          64
-
-                         │
-                         ▼
-        
-        Step 5a: Transpose back
-        (batch, heads, seq, 64) → (batch, seq, heads, 64)
-        
-                         │
-                         ▼
-        
-        Step 5b: View/Reshape
-        (batch, seq, 12, 64) → (batch, seq, 768)
-
-AFTER:  One combined vector of 768
-
-        [████████████████████████████████████████████]
-                         768
-```
-
-### Code:
-```python
-context = context.transpose(1, 2)                    # (batch, seq, heads, head_dim)
-context = context.contiguous().view(batch, seq, 768) # (batch, seq, 768)
-```
-
-### Shape Change:
-```
-(batch, 12, seq, 64) → (batch, seq, 12, 64) → (batch, seq, 768)
-```
-
----
-
-## STEP 6: PROJECT (Final output)
-
-### What happens:
-One more linear layer to mix information from all heads
-
-### Visual:
-```
-INPUT:  (batch, seq, 768)
-              │
-              ▼
-    ┌─────────────────────┐
-    │  context @ W_output │
-    └─────────────────────┘
-              │
-              ▼
-OUTPUT: (batch, seq, 768)
-```
-
-### Code:
-```python
-output = self.out_proj(context)  # (batch, seq, 768)
-```
-
-### Shape Change:
-```
-(batch, seq, 768) → (batch, seq, 768)  # Same shape
-```
-
----
-
-# 📊 COMPLETE PICTURE (All 6 Steps)
-
-```
-INPUT (batch, seq, 768)
-         │
-         ▼
-┌─────────────────────┐
-│  1. PROJECT         │  Q = W_q(x), K = W_k(x), V = W_v(x)
-│     Create Q, K, V  │  
-└─────────────────────┘
-         │
-         ▼ (batch, seq, 768)
-┌─────────────────────┐
-│  2. SPLIT           │  .view(batch, seq, 12, 64)
-│     Into 12 heads   │  
-└─────────────────────┘
-         │
-         ▼ (batch, seq, 12, 64)
-┌─────────────────────┐
-│  3. TRANSPOSE       │  .transpose(1, 2)
-│     Move heads dim  │  
-└─────────────────────┘
-         │
-         ▼ (batch, 12, seq, 64)
-┌─────────────────────┐
-│  4. ATTENTION       │  
-│    4a. Q @ K^T      │  → scores
-│    4b. Mask future  │  → masked scores
-│    4c. Scale+Softmax│  → weights
-│    4d. weights @ V  │  → context
-└─────────────────────┘
-         │
-         ▼ (batch, 12, seq, 64)
-┌─────────────────────┐
-│  5. CONCAT          │  .transpose(1,2).view(batch, seq, 768)
-│     Combine heads   │  
-└─────────────────────┘
-         │
-         ▼ (batch, seq, 768)
-┌─────────────────────┐
-│  6. PROJECT         │  out_proj(context)
-│     Final mixing    │  
-└─────────────────────┘
-         │
-         ▼
-OUTPUT (batch, seq, 768)
-```
-
----
-
-# 📋 SUMMARY TABLE
-
-| Step | Name | Operation | Shape Change |
-|------|------|-----------|--------------|
-| 1 | PROJECT | `W_q(x), W_k(x), W_v(x)` | (b,s,768) → (b,s,768) |
-| 2 | SPLIT | `.view(b,s,12,64)` | (b,s,768) → (b,s,12,64) |
-| 3 | TRANSPOSE | `.transpose(1,2)` | (b,s,12,64) → (b,12,s,64) |
-| 4 | ATTENTION | `softmax(QK^T/√d) @ V` | (b,12,s,64) → (b,12,s,64) |
-| 5 | CONCAT | `.transpose(1,2).view()` | (b,12,s,64) → (b,s,768) |
-| 6 | PROJECT | `out_proj()` | (b,s,768) → (b,s,768) |
-
----
-
-# 💻 COMPLETE CODE TEMPLATE
-
-## Copy this for homework:
+### Complete Implementation
 
 ```python
 import torch
@@ -715,258 +470,618 @@ import torch.nn as nn
 
 class MultiHeadAttention(nn.Module):
     """
-    Multi-Head Attention with Causal Mask
-    Based on Chapter 3 of 'Build a Large Language Model From Scratch'
+    Multi-Head Attention mechanism as used in GPT models.
+    
+    This implementation uses the efficient "split" approach:
+    1. Project input to Q, K, V with single large matrices
+    2. Reshape to split into multiple heads
+    3. Compute attention for all heads in parallel
+    4. Concatenate and project output
+    
+    Args:
+        d_in: Input embedding dimension
+        d_out: Output embedding dimension (must be divisible by num_heads)
+        context_length: Maximum sequence length for causal mask
+        dropout: Dropout probability for attention weights
+        num_heads: Number of attention heads
+        qkv_bias: Whether to use bias in Q, K, V projections
+    
+    Example:
+        >>> mha = MultiHeadAttention(
+        ...     d_in=768, d_out=768, context_length=1024,
+        ...     dropout=0.1, num_heads=12
+        ... )
+        >>> x = torch.randn(2, 100, 768)  # (batch, seq_len, d_in)
+        >>> output = mha(x)
+        >>> output.shape
+        torch.Size([2, 100, 768])
     """
     
     def __init__(self, d_in, d_out, context_length, dropout, num_heads, qkv_bias=False):
         super().__init__()
         
-        # Validate: d_out must be divisible by num_heads
-        assert d_out % num_heads == 0, "d_out must be divisible by num_heads"
+        # ═══════════════════════════════════════════════════════════
+        # VALIDATION
+        # ═══════════════════════════════════════════════════════════
+        assert d_out % num_heads == 0, \
+            f"d_out ({d_out}) must be divisible by num_heads ({num_heads})"
         
-        # Save configuration
+        # ═══════════════════════════════════════════════════════════
+        # STORE CONFIGURATION
+        # ═══════════════════════════════════════════════════════════
         self.d_out = d_out
         self.num_heads = num_heads
-        self.head_dim = d_out // num_heads  # 768 // 12 = 64
+        self.head_dim = d_out // num_heads  # Dimension per head
         
-        # STEP 1 weights: Q, K, V projections
+        # ═══════════════════════════════════════════════════════════
+        # PROJECTION LAYERS
+        # ═══════════════════════════════════════════════════════════
+        # Single large projection instead of num_heads small ones
+        # More efficient due to batched matrix multiplication
         self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
-        self.W_key = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_key   = nn.Linear(d_in, d_out, bias=qkv_bias)
         self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
         
-        # STEP 6 weights: Output projection
+        # Output projection to combine heads
         self.out_proj = nn.Linear(d_out, d_out)
         
-        # Dropout and causal mask
+        # ═══════════════════════════════════════════════════════════
+        # REGULARIZATION
+        # ═══════════════════════════════════════════════════════════
         self.dropout = nn.Dropout(dropout)
+        
+        # ═══════════════════════════════════════════════════════════
+        # CAUSAL MASK
+        # ═══════════════════════════════════════════════════════════
+        # Upper triangular matrix: 1s above diagonal, 0s elsewhere
+        # Used to mask future tokens
         self.register_buffer(
-            "mask",
+            'mask',
             torch.triu(torch.ones(context_length, context_length), diagonal=1)
         )
     
     def forward(self, x):
-        b, num_tokens, d_in = x.shape
+        """
+        Forward pass of multi-head attention.
         
-        # ========== STEP 1: PROJECT ==========
-        # Create Q, K, V
-        Q = self.W_query(x)  # (b, seq, d_out)
-        K = self.W_key(x)
-        V = self.W_value(x)
+        Args:
+            x: Input tensor of shape (batch_size, seq_length, d_in)
         
-        # ========== STEP 2: SPLIT ==========
-        # (b, seq, d_out) → (b, seq, num_heads, head_dim)
-        Q = Q.view(b, num_tokens, self.num_heads, self.head_dim)
-        K = K.view(b, num_tokens, self.num_heads, self.head_dim)
-        V = V.view(b, num_tokens, self.num_heads, self.head_dim)
+        Returns:
+            Output tensor of shape (batch_size, seq_length, d_out)
+        """
+        # ═══════════════════════════════════════════════════════════
+        # STEP 1: GET INPUT DIMENSIONS
+        # ═══════════════════════════════════════════════════════════
+        batch_size, num_tokens, d_in = x.shape
         
-        # ========== STEP 3: TRANSPOSE ==========
-        # (b, seq, num_heads, head_dim) → (b, num_heads, seq, head_dim)
-        Q = Q.transpose(1, 2)
-        K = K.transpose(1, 2)
-        V = V.transpose(1, 2)
+        # ═══════════════════════════════════════════════════════════
+        # STEP 2: PROJECT TO Q, K, V
+        # ═══════════════════════════════════════════════════════════
+        # Shape: (batch_size, num_tokens, d_out)
+        queries = self.W_query(x)
+        keys    = self.W_key(x)
+        values  = self.W_value(x)
         
-        # ========== STEP 4: ATTENTION ==========
-        # 4a. Compute attention scores: Q @ K^T
-        attn_scores = Q @ K.transpose(2, 3)  # (b, heads, seq, seq)
+        # ═══════════════════════════════════════════════════════════
+        # STEP 3: SPLIT INTO MULTIPLE HEADS
+        # ═══════════════════════════════════════════════════════════
+        # Reshape: (batch, seq, d_out) → (batch, seq, num_heads, head_dim)
+        queries = queries.view(batch_size, num_tokens, self.num_heads, self.head_dim)
+        keys    = keys.view(batch_size, num_tokens, self.num_heads, self.head_dim)
+        values  = values.view(batch_size, num_tokens, self.num_heads, self.head_dim)
         
-        # 4b. Apply causal mask
+        # Transpose: (batch, seq, heads, head_dim) → (batch, heads, seq, head_dim)
+        # This groups all positions for each head together
+        queries = queries.transpose(1, 2)
+        keys    = keys.transpose(1, 2)
+        values  = values.transpose(1, 2)
+        
+        # ═══════════════════════════════════════════════════════════
+        # STEP 4: COMPUTE ATTENTION SCORES
+        # ═══════════════════════════════════════════════════════════
+        # (batch, heads, seq, head_dim) @ (batch, heads, head_dim, seq)
+        # = (batch, heads, seq, seq)
+        attn_scores = queries @ keys.transpose(2, 3)
+        
+        # ═══════════════════════════════════════════════════════════
+        # STEP 5: APPLY CAUSAL MASK
+        # ═══════════════════════════════════════════════════════════
+        # Mask future positions with -inf (becomes 0 after softmax)
         mask_bool = self.mask.bool()[:num_tokens, :num_tokens]
         attn_scores.masked_fill_(mask_bool, -torch.inf)
         
-        # 4c. Scale and softmax
-        attn_scores = attn_scores / (self.head_dim ** 0.5)
-        attn_weights = torch.softmax(attn_scores, dim=-1)
+        # ═══════════════════════════════════════════════════════════
+        # STEP 6: SCALE AND NORMALIZE
+        # ═══════════════════════════════════════════════════════════
+        # Scale by √head_dim for numerical stability
+        attn_weights = torch.softmax(
+            attn_scores / self.head_dim ** 0.5,
+            dim=-1
+        )
+        
+        # Apply dropout (only active during training)
         attn_weights = self.dropout(attn_weights)
         
-        # 4d. Apply attention to values
-        context = attn_weights @ V  # (b, heads, seq, head_dim)
+        # ═══════════════════════════════════════════════════════════
+        # STEP 7: COMPUTE CONTEXT VECTORS
+        # ═══════════════════════════════════════════════════════════
+        # (batch, heads, seq, seq) @ (batch, heads, seq, head_dim)
+        # = (batch, heads, seq, head_dim)
+        context_vec = attn_weights @ values
         
-        # ========== STEP 5: CONCAT ==========
-        # (b, heads, seq, head_dim) → (b, seq, heads, head_dim) → (b, seq, d_out)
-        context = context.transpose(1, 2)
-        context = context.contiguous().view(b, num_tokens, self.d_out)
+        # ═══════════════════════════════════════════════════════════
+        # STEP 8: COMBINE HEADS
+        # ═══════════════════════════════════════════════════════════
+        # Transpose back: (batch, heads, seq, head_dim) → (batch, seq, heads, head_dim)
+        context_vec = context_vec.transpose(1, 2)
         
-        # ========== STEP 6: PROJECT ==========
-        output = self.out_proj(context)
+        # Reshape to concatenate heads: (batch, seq, heads * head_dim) = (batch, seq, d_out)
+        # .contiguous() ensures memory layout is correct for .view()
+        context_vec = context_vec.contiguous().view(batch_size, num_tokens, self.d_out)
         
-        return output
+        # ═══════════════════════════════════════════════════════════
+        # STEP 9: OUTPUT PROJECTION
+        # ═══════════════════════════════════════════════════════════
+        # Final linear transformation to mix information from all heads
+        context_vec = self.out_proj(context_vec)
+        
+        return context_vec
 ```
 
----
-
-# 🧪 HOW TO USE IT
+### Usage Examples
 
 ```python
-# Configuration (GPT-2 small style)
-d_model = 768          # Embedding dimension
-num_heads = 12         # Number of attention heads  
-context_length = 1024  # Maximum sequence length
-dropout = 0.1          # Dropout rate
-
-# Create the model
+# ═══════════════════════════════════════════════════════════════
+# EXAMPLE 1: Basic Usage
+# ═══════════════════════════════════════════════════════════════
 mha = MultiHeadAttention(
-    d_in=d_model,
-    d_out=d_model,
-    context_length=context_length,
-    dropout=dropout,
-    num_heads=num_heads,
-    qkv_bias=False
+    d_in=768,
+    d_out=768,
+    context_length=1024,
+    dropout=0.1,
+    num_heads=12
 )
 
-# Create dummy input
-batch_size = 4
-seq_len = 100
-x = torch.randn(batch_size, seq_len, d_model)
-
-# Forward pass
+# Random input: (batch_size=2, seq_length=100, d_in=768)
+x = torch.randn(2, 100, 768)
 output = mha(x)
+print(f"Output shape: {output.shape}")  # torch.Size([2, 100, 768])
 
-print(f"Input shape:  {x.shape}")      # (4, 100, 768)
-print(f"Output shape: {output.shape}") # (4, 100, 768)
+# ═══════════════════════════════════════════════════════════════
+# EXAMPLE 2: GPT-2 Small Configuration
+# ═══════════════════════════════════════════════════════════════
+gpt2_small_mha = MultiHeadAttention(
+    d_in=768,           # Embedding dimension
+    d_out=768,          # Same as d_in in GPT
+    context_length=1024, # Max sequence length
+    dropout=0.1,
+    num_heads=12        # 12 attention heads
+)
+
+# ═══════════════════════════════════════════════════════════════
+# EXAMPLE 3: Count Parameters
+# ═══════════════════════════════════════════════════════════════
+total_params = sum(p.numel() for p in mha.parameters())
+print(f"Total parameters: {total_params:,}")
+# W_query: 768 * 768 = 589,824
+# W_key:   768 * 768 = 589,824
+# W_value: 768 * 768 = 589,824
+# out_proj: 768 * 768 = 589,824
+# Total: 2,359,296 parameters
+
+# ═══════════════════════════════════════════════════════════════
+# EXAMPLE 4: Training Mode vs Eval Mode
+# ═══════════════════════════════════════════════════════════════
+mha.train()  # Dropout is active
+mha.eval()   # Dropout is disabled
+
+# ═══════════════════════════════════════════════════════════════
+# EXAMPLE 5: Move to GPU
+# ═══════════════════════════════════════════════════════════════
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+mha = mha.to(device)
+x = x.to(device)
+output = mha(x)
+```
+
+### Shape Transformations (Visual Guide)
+
+```
+Input x:           (batch=2, seq=6, d_in=768)
+                          │
+                          ▼ W_query, W_key, W_value
+Q, K, V:           (batch=2, seq=6, d_out=768)
+                          │
+                          ▼ .view(batch, seq, num_heads, head_dim)
+Split:             (batch=2, seq=6, heads=12, head_dim=64)
+                          │
+                          ▼ .transpose(1, 2)
+Transposed:        (batch=2, heads=12, seq=6, head_dim=64)
+                          │
+                          ▼ Q @ K.T
+Attention Scores:  (batch=2, heads=12, seq=6, seq=6)
+                          │
+                          ▼ mask, softmax, dropout
+Attention Weights: (batch=2, heads=12, seq=6, seq=6)
+                          │
+                          ▼ @ V
+Context:           (batch=2, heads=12, seq=6, head_dim=64)
+                          │
+                          ▼ .transpose(1, 2)
+Transposed Back:   (batch=2, seq=6, heads=12, head_dim=64)
+                          │
+                          ▼ .view(batch, seq, d_out)
+Concatenated:      (batch=2, seq=6, d_out=768)
+                          │
+                          ▼ out_proj
+Output:            (batch=2, seq=6, d_out=768)
 ```
 
 ---
 
-# 🔑 THE 4 KEY OPERATIONS EXPLAINED
+## Complete Production Code
 
-## 1️⃣ `.view()` - Reshape without copying
-
-```python
-# Split 768 into 12 heads of 64
-x = torch.randn(4, 100, 768)
-x = x.view(4, 100, 12, 64)
-
-# Think: [████████] → [██] [██] [██] [██]...
-#           768        64   64   64   64
-```
-
-## 2️⃣ `.transpose(dim1, dim2)` - Swap dimensions
+> Copy this entire class for your research projects
 
 ```python
-x = torch.randn(4, 100, 12, 64)
-#                b  seq heads dim
+"""
+Multi-Head Attention Module for Transformer Models
+Based on "Attention Is All You Need" (Vaswani et al., 2017)
+Implementation follows "Build a Large Language Model From Scratch" by Sebastian Raschka
 
-x = x.transpose(1, 2)
-#                b  heads seq  dim
-# Shape: (4, 12, 100, 64)
-```
+Author: Pascal Burume
+Date: January 2025
+"""
 
-## 3️⃣ `@` (Matrix Multiply) - The attention computation
+import torch
+import torch.nn as nn
+from typing import Optional
 
-```python
-Q = torch.randn(4, 12, 100, 64)
-K = torch.randn(4, 12, 100, 64)
 
-# Q @ K^T
-attn_scores = Q @ K.transpose(2, 3)
-# (4, 12, 100, 64) @ (4, 12, 64, 100) → (4, 12, 100, 100)
-```
+class MultiHeadAttention(nn.Module):
+    """
+    Multi-Head Attention with causal masking for autoregressive models.
+    
+    This is the standard attention mechanism used in GPT-style models.
+    It supports:
+    - Multiple attention heads for learning diverse patterns
+    - Causal masking for left-to-right generation
+    - Dropout for regularization
+    - Efficient batched computation
+    
+    Attributes:
+        d_out (int): Output dimension
+        num_heads (int): Number of attention heads
+        head_dim (int): Dimension per head (d_out // num_heads)
+        W_query (nn.Linear): Query projection
+        W_key (nn.Linear): Key projection
+        W_value (nn.Linear): Value projection
+        out_proj (nn.Linear): Output projection
+        dropout (nn.Dropout): Dropout layer
+        mask (torch.Tensor): Causal attention mask
+    """
+    
+    def __init__(
+        self,
+        d_in: int,
+        d_out: int,
+        context_length: int,
+        dropout: float,
+        num_heads: int,
+        qkv_bias: bool = False
+    ):
+        """
+        Initialize Multi-Head Attention.
+        
+        Args:
+            d_in: Input embedding dimension
+            d_out: Output embedding dimension
+            context_length: Maximum sequence length
+            dropout: Dropout probability (0.0 to 1.0)
+            num_heads: Number of attention heads
+            qkv_bias: Use bias in Q, K, V projections
+            
+        Raises:
+            AssertionError: If d_out is not divisible by num_heads
+        """
+        super().__init__()
+        
+        assert d_out % num_heads == 0, \
+            f"d_out ({d_out}) must be divisible by num_heads ({num_heads})"
+        
+        self.d_out = d_out
+        self.num_heads = num_heads
+        self.head_dim = d_out // num_heads
+        
+        # Projection layers
+        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_key = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.out_proj = nn.Linear(d_out, d_out)
+        
+        # Regularization
+        self.dropout = nn.Dropout(dropout)
+        
+        # Causal mask (upper triangular)
+        self.register_buffer(
+            'mask',
+            torch.triu(torch.ones(context_length, context_length), diagonal=1)
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass.
+        
+        Args:
+            x: Input tensor of shape (batch_size, seq_length, d_in)
+            
+        Returns:
+            Output tensor of shape (batch_size, seq_length, d_out)
+        """
+        b, n, _ = x.shape
+        
+        # Project to Q, K, V
+        q = self.W_query(x)
+        k = self.W_key(x)
+        v = self.W_value(x)
+        
+        # Split into heads
+        q = q.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Attention scores
+        scores = q @ k.transpose(-2, -1)
+        
+        # Apply causal mask
+        scores.masked_fill_(self.mask.bool()[:n, :n], float('-inf'))
+        
+        # Scale, normalize, dropout
+        weights = torch.softmax(scores / (self.head_dim ** 0.5), dim=-1)
+        weights = self.dropout(weights)
+        
+        # Compute output
+        out = weights @ v
+        out = out.transpose(1, 2).contiguous().view(b, n, self.d_out)
+        out = self.out_proj(out)
+        
+        return out
 
-## 4️⃣ `.contiguous().view()` - Safe reshape after transpose
 
-```python
-# After transpose, memory may not be contiguous
-x = x.transpose(1, 2)          # Memory not contiguous
-x = x.contiguous()             # Make contiguous
-x = x.view(b, seq, d_out)      # Now safe to reshape
+# ═══════════════════════════════════════════════════════════════
+# FACTORY FUNCTIONS FOR COMMON CONFIGURATIONS
+# ═══════════════════════════════════════════════════════════════
 
-# Often written as:
-x = x.transpose(1, 2).contiguous().view(b, seq, d_out)
+def create_gpt2_small_attention(dropout: float = 0.1) -> MultiHeadAttention:
+    """Create attention module with GPT-2 Small configuration."""
+    return MultiHeadAttention(
+        d_in=768, d_out=768, context_length=1024,
+        dropout=dropout, num_heads=12
+    )
+
+def create_gpt2_medium_attention(dropout: float = 0.1) -> MultiHeadAttention:
+    """Create attention module with GPT-2 Medium configuration."""
+    return MultiHeadAttention(
+        d_in=1024, d_out=1024, context_length=1024,
+        dropout=dropout, num_heads=24
+    )
+
+def create_gpt2_large_attention(dropout: float = 0.1) -> MultiHeadAttention:
+    """Create attention module with GPT-2 Large configuration."""
+    return MultiHeadAttention(
+        d_in=1280, d_out=1280, context_length=1024,
+        dropout=dropout, num_heads=36
+    )
+
+def create_gpt2_xl_attention(dropout: float = 0.1) -> MultiHeadAttention:
+    """Create attention module with GPT-2 XL configuration."""
+    return MultiHeadAttention(
+        d_in=1600, d_out=1600, context_length=1024,
+        dropout=dropout, num_heads=25
+    )
 ```
 
 ---
 
-# ❓ COMMON HOMEWORK QUESTIONS
+## GPT-2 Specifications
 
-## Q1: "What is the purpose of each weight matrix?"
+| Model | Parameters | Layers | d_model | Heads | head_dim | Context |
+|-------|------------|--------|---------|-------|----------|---------|
+| GPT-2 Small | 117M | 12 | 768 | 12 | 64 | 1024 |
+| GPT-2 Medium | 345M | 24 | 1024 | 24 | ~43 | 1024 |
+| GPT-2 Large | 762M | 36 | 1280 | 36 | ~36 | 1024 |
+| GPT-2 XL | 1.5B | 48 | 1600 | 25 | 64 | 1024 |
 
-| Matrix | Purpose | Analogy |
-|--------|---------|---------|
-| `W_query` | Create search queries | "What am I looking for?" |
-| `W_key` | Create keys for matching | "What do I contain?" |
-| `W_value` | Create values to retrieve | "What info do I provide?" |
-| `out_proj` | Combine all head outputs | "Mix everything together" |
-
-## Q2: "Why do we scale by sqrt(head_dim)?"
+### Configuration Dictionary
 
 ```python
-attn_scores = attn_scores / (self.head_dim ** 0.5)
+GPT2_CONFIGS = {
+    "gpt2-small": {
+        "vocab_size": 50257,
+        "context_length": 1024,
+        "d_model": 768,
+        "num_heads": 12,
+        "num_layers": 12,
+        "dropout": 0.1,
+        "qkv_bias": False
+    },
+    "gpt2-medium": {
+        "vocab_size": 50257,
+        "context_length": 1024,
+        "d_model": 1024,
+        "num_heads": 24,
+        "num_layers": 24,
+        "dropout": 0.1,
+        "qkv_bias": False
+    },
+    "gpt2-large": {
+        "vocab_size": 50257,
+        "context_length": 1024,
+        "d_model": 1280,
+        "num_heads": 36,
+        "num_layers": 36,
+        "dropout": 0.1,
+        "qkv_bias": False
+    },
+    "gpt2-xl": {
+        "vocab_size": 50257,
+        "context_length": 1024,
+        "d_model": 1600,
+        "num_heads": 25,
+        "num_layers": 48,
+        "dropout": 0.1,
+        "qkv_bias": False
+    }
+}
 ```
 
-**Answer:** 
-- Large dot products → extreme softmax values → tiny gradients
-- Scaling keeps values in reasonable range
-- head_dim=64 → scale by √64 = 8
+---
 
-## Q3: "What does the causal mask do?"
+## Common Errors & Solutions
+
+### Error 1: d_out not divisible by num_heads
 
 ```python
-mask = torch.triu(torch.ones(seq, seq), diagonal=1)
-attn_scores.masked_fill_(mask.bool(), -torch.inf)
+# ❌ ERROR
+mha = MultiHeadAttention(d_in=768, d_out=768, num_heads=7, ...)
+# AssertionError: d_out (768) must be divisible by num_heads (7)
+
+# ✅ SOLUTION: Use num_heads that divides d_out evenly
+mha = MultiHeadAttention(d_in=768, d_out=768, num_heads=12, ...)  # 768/12=64 ✓
 ```
 
-**Answer:**
-- Creates upper triangular matrix of 1s
-- Fills future positions with -infinity
-- After softmax: -inf → 0 (can't attend to future!)
+### Error 2: Missing super().__init__()
 
-## Q4: "Why multiple heads?"
+```python
+# ❌ ERROR
+class MyAttention(nn.Module):
+    def __init__(self, ...):
+        # Forgot super().__init__()
+        self.W_query = nn.Linear(...)  # RuntimeError!
 
-**Answer:** Different heads learn different patterns:
-- Head 1: Subject-verb relationships
-- Head 2: Pronoun references  
-- Head 3: Adjacent word context
-- Head 4: Sentence structure
-- etc.
-
----
-
-# 🎯 MEMORY TRICKS
-
-## The Octopus 🐙
-```
-        🐙 OCTOPUS
-       /  |  |  \
-      /   |  |   \
-     🦑  🦑  🦑  🦑   ← 8 arms = 8 heads
-     │   │   │   │
-     ▼   ▼   ▼   ▼
-   Each arm grabs
-   different things!
-         │
-         ▼
-    🧠 Brain combines
-    all information
+# ✅ SOLUTION: Always call super().__init__() first
+class MyAttention(nn.Module):
+    def __init__(self, ...):
+        super().__init__()  # ← Add this!
+        self.W_query = nn.Linear(...)
 ```
 
-## Easy Phrase
-> **"Project, Split, Transpose, Attend, Concat, Project"**
+### Error 3: Dimension Mismatch
 
-Or shorter: **"PSTACP"** (Project-Split-Transpose-Attention-Concat-Project)
+```python
+# ❌ ERROR: Input dimension doesn't match d_in
+mha = MultiHeadAttention(d_in=768, ...)
+x = torch.randn(2, 100, 512)  # d_in=512, but expected 768!
+output = mha(x)  # RuntimeError: mat1 and mat2 shapes cannot be multiplied
+
+# ✅ SOLUTION: Ensure input dimension matches d_in
+x = torch.randn(2, 100, 768)  # Correct dimension
+output = mha(x)
+```
+
+### Error 4: Forgetting .contiguous() before .view()
+
+```python
+# ❌ ERROR
+context_vec = context_vec.transpose(1, 2)
+context_vec = context_vec.view(b, n, self.d_out)  # RuntimeError!
+
+# ✅ SOLUTION: Call .contiguous() after transpose
+context_vec = context_vec.transpose(1, 2).contiguous()
+context_vec = context_vec.view(b, n, self.d_out)  # Works!
+```
+
+### Error 5: Mask Shape Mismatch
+
+```python
+# ❌ ERROR: Sequence longer than context_length
+mha = MultiHeadAttention(context_length=512, ...)
+x = torch.randn(2, 1024, 768)  # seq_length=1024 > context_length=512
+output = mha(x)  # IndexError!
+
+# ✅ SOLUTION: Ensure seq_length ≤ context_length
+mha = MultiHeadAttention(context_length=1024, ...)  # Or truncate input
+```
 
 ---
 
-# ✅ FINAL CHECKLIST FOR HOMEWORK
+## Quick Reference Cheat Sheet
 
-- [ ] Understand the 6 steps
-- [ ] Know the formula: `d_model = num_heads × head_dim`
-- [ ] Know the 4 operations: `.view()`, `.transpose()`, `@`, `.contiguous()`
-- [ ] Input shape = Output shape: `(batch, seq, d_model)`
-- [ ] Can explain: Why scale? Why mask? Why multiple heads?
+### Core Formula
+
+```
+Attention(Q, K, V) = softmax(QK^T / √d_k) × V
+```
+
+### Key Shapes
+
+```python
+# Input
+x:       (batch, seq_len, d_in)
+
+# After projection
+Q, K, V: (batch, seq_len, d_out)
+
+# After splitting into heads
+Q, K, V: (batch, num_heads, seq_len, head_dim)
+
+# Attention scores
+scores:  (batch, num_heads, seq_len, seq_len)
+
+# Output
+output:  (batch, seq_len, d_out)
+```
+
+### Essential PyTorch Operations
+
+```python
+# Matrix multiplication
+A @ B                      # Standard matmul
+torch.bmm(A, B)            # Batch matmul
+
+# Reshaping
+x.view(b, n, h, d)         # Reshape tensor
+x.transpose(1, 2)          # Swap dimensions
+x.contiguous()             # Ensure memory layout
+
+# Masking
+x.masked_fill_(mask, val)  # In-place fill where mask is True
+torch.triu(x, diagonal=1)  # Upper triangular matrix
+
+# Normalization
+torch.softmax(x, dim=-1)   # Softmax along last dimension
+
+# Registration
+self.register_buffer('name', tensor)  # Save with model, not trained
+```
+
+### Hyperparameters
+
+| Parameter | Typical Values | Notes |
+|-----------|---------------|-------|
+| d_model | 256, 512, 768, 1024 | Model dimension |
+| num_heads | 4, 8, 12, 16 | Must divide d_model |
+| head_dim | 64 | Usually d_model / num_heads |
+| dropout | 0.0, 0.1, 0.2 | Higher = more regularization |
+| context_length | 512, 1024, 2048 | Max sequence length |
 
 ---
 
-# 📊 REAL-WORLD MODEL CONFIGURATIONS
+## References
 
-| Model | d_model | num_heads | head_dim |
-|-------|---------|-----------|----------|
-| GPT-2 Small | 768 | 12 | 64 |
-| GPT-2 Medium | 1024 | 16 | 64 |
-| GPT-2 Large | 1280 | 20 | 64 |
-| GPT-2 XL | 1600 | 25 | 64 |
-| GPT-3 | 12288 | 96 | 128 |
+1. Vaswani, A., et al. (2017). "Attention Is All You Need." *NeurIPS*.
+2. Raschka, S. (2024). "Build a Large Language Model From Scratch." Manning Publications.
+3. Radford, A., et al. (2019). "Language Models are Unsupervised Multitask Learners." OpenAI.
 
 ---
 
-Good luck with your homework, Pascal! 🚀
+## Document History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0 | Jan 2025 | Initial version |
+
+---
+
+*This document is part of the Mwalimu-STEM-GenAI research project.*
