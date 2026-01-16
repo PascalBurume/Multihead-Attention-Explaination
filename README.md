@@ -786,14 +786,23 @@ class MultiHeadAttention(nn.Module):
             AssertionError: If d_out is not divisible by num_heads
         """
         super().__init__()
-        
+
+        ### VIDEO REF (02:18): The Divisibility Check
+        ### We must ensure d_out splits evenly into heads. 
+        ### If d_out is 4 and heads is 2, each head gets a dimension of 2.
+
         assert d_out % num_heads == 0, \
             f"d_out ({d_out}) must be divisible by num_heads ({num_heads})"
         
         self.d_out = d_out
         self.num_heads = num_heads
         self.head_dim = d_out // num_heads
-        
+
+
+        ### VIDEO REF (03:00): The "One Big Matrix" Approach
+        ### Instead of stacking many separate Linear layers, we use one large 
+        ### matrix projection. This corresponds to the 'W_query' in Figure 3.26.
+
         # Projection layers
         self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
         self.W_key = nn.Linear(d_in, d_out, bias=qkv_bias)
@@ -802,7 +811,8 @@ class MultiHeadAttention(nn.Module):
         
         # Regularization
         self.dropout = nn.Dropout(dropout)
-        
+
+        ### Causal mask (Professor's Note: Essential for 'predicting the next token')
         # Causal mask (upper triangular)
         self.register_buffer(
             'mask',
@@ -820,27 +830,43 @@ class MultiHeadAttention(nn.Module):
             Output tensor of shape (batch_size, seq_length, d_out)
         """
         b, n, _ = x.shape
-        
+
+        ### 1. THE PROJECTION (VIDEO REF 05:32)
+        ### We project the input into Q, K, V in one high-speed operation.
         # Project to Q, K, V
         q = self.W_query(x)
         k = self.W_key(x)
         v = self.W_value(x)
-        
+
+
+        ### 2. THE SPLIT / "UNROLLING" (VIDEO REF 05:43)
+        ### This is where we 'slice' the big matrix into individual heads.
+        ### Mental Model: Think of a long loaf of bread being sliced into heads.
+        ### .transpose(1, 2) moves the 'heads' dimension to the front so we 
+        ### can do batch matrix multiplication on all heads at once.
         # Split into heads
         q = q.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-        
+
+        ### The '@' operator in PyTorch performs the dot product for ALL heads 
+        ### simultaneously. This is much faster than a Python loop!
         # Attention scores
         scores = q @ k.transpose(-2, -1)
-        
+
+        ### Apply causal mask (Professor's Note: This prevents looking at future tokens)
         # Apply causal mask
         scores.masked_fill_(self.mask.bool()[:n, :n], float('-inf'))
         
         # Scale, normalize, dropout
         weights = torch.softmax(scores / (self.head_dim ** 0.5), dim=-1)
         weights = self.dropout(weights)
-        
+
+        ### 4. RECOMBINING HEADS (VIDEO REF 07:31)
+        ### After calculating attention for each head, we 'glue' them back together.
+        ### .contiguous() is used because .transpose() changes how memory is stored.
+        ### Sebastian explains this as 're-organizing' memory for efficiency
+
         # Compute output
         out = weights @ v
         out = out.transpose(1, 2).contiguous().view(b, n, self.d_out)
